@@ -1,0 +1,1195 @@
+import { useState, useEffect } from 'react';
+import { mirrorExternalImages } from '@/lib/cloudinary';
+import { functionErrorMessage } from '@/lib/functionError';
+import { useNavigate, Link } from 'react-router-dom';
+import { useAuth } from '@/hooks/useAuth';
+import { supabase } from '@/integrations/supabase/client';
+import { removeProducts, removeSummary } from '@/lib/removeProducts';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Textarea } from '@/components/ui/textarea';
+import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { toast } from 'sonner';
+import { formatNaira } from '@/lib/format';
+import { useCategories } from '@/hooks/useProducts';
+import {
+  Package, ShoppingCart, Users, DollarSign, Plus, LogOut, ArrowLeft,
+  Trash2, Store, CheckCircle, XCircle, Eye, BarChart3, CreditCard,
+  FileText, AlertCircle, TrendingUp, Layers, FolderPlus, Pencil, Flag, Image as ImageIcon,
+  LayoutDashboard, Megaphone, Settings, Wallet, ChevronRight, Landmark, Percent, Activity, Video, Copy
+} from 'lucide-react';
+import DashboardShell, { Panel, StatCard, StatusDot, WelcomeBanner, useTabParam, type DashNavItem } from '@/components/dashboard/DashboardShell';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import FlyersTab from '@/components/admin/FlyersTab';
+import MarketplaceAdminTab, { TikTokSwitch } from '@/components/admin/MarketplaceAdminTab';
+import TrafficTab from '@/components/admin/TrafficTab';
+import FinanceTab from '@/components/admin/FinanceTab';
+import OrderOpsTab from '@/components/admin/OrderOpsTab';
+import SupplierCommissionTab from '@/components/admin/SupplierCommissionTab';
+import AnalyticsTab from '@/components/admin/AnalyticsTab';
+import BulkProductImportTab from '@/components/admin/BulkProductImportTab';
+import { ExportButton } from '@/components/admin/analyticsUi';
+import ProductPager from '@/components/ProductPager';
+import { useManagedProducts, MANAGE_PAGE_SIZE, MAX_MANAGE_PAGES } from '@/hooks/useManagedProducts';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { formatProductCount } from '@/lib/productSearch';
+import { usePendingReports, useResolveReport, useDeactivatePost, useDeleteComment } from '@/hooks/useReports';
+
+export default function AdminDashboard() {
+  const { user, isAdmin, loading, signOut } = useAuth();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useTabParam('overview');
+
+  useEffect(() => {
+    if (!loading && (!user || !isAdmin)) {
+      navigate('/admin-login');
+    }
+  }, [user, isAdmin, loading, navigate]);
+
+  const canFetchAdminData = !loading && !!user && isAdmin;
+
+  // One page of products at a time, searched and paged by the database (millions of products).
+  const [productPage, setProductPage] = useState(1);
+  const [productSearch, setProductSearch] = useState('');
+  const debouncedProductSearch = useDebouncedValue(productSearch.trim(), 350);
+  const { data: productData, isLoading: productsLoading, error: productsError, isPlaceholderData: productsRefreshing } = useManagedProducts({
+    scope: 'admin', page: productPage, search: debouncedProductSearch, enabled: canFetchAdminData && activeTab === 'products',
+  });
+  const products = productData?.items;
+
+  const { data: orders, isLoading: ordersLoading, error: ordersError } = useQuery({
+    queryKey: ['admin-orders'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('orders').select('*').order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: canFetchAdminData,
+  });
+
+  const { data: vendors, isLoading: vendorsLoading, error: vendorsError } = useQuery({
+    queryKey: ['admin-vendors'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('vendors').select('*').order('created_at', { ascending: false });
+      if (error) throw error;
+      // Bank details and verification documents are kept in a private (admin-only) table.
+      const { data: priv } = await supabase.from('vendor_private').select('*');
+      const privateByVendor = new Map((priv ?? []).map(p => [p.vendor_id, p]));
+      return (data || []).map(v => {
+        const p = privateByVendor.get(v.id);
+        return {
+          ...v,
+          bank_name: p?.bank_name ?? null,
+          bank_account_number: p?.bank_account_number ?? null,
+          bank_account_name: p?.bank_account_name ?? null,
+          verification_document_url: p?.verification_document_path ?? null,
+        };
+      });
+    },
+    enabled: canFetchAdminData,
+  });
+
+  const { data: payments, isLoading: paymentsLoading, error: paymentsError } = useQuery({
+    queryKey: ['admin-payments'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('payments').select('*').order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: canFetchAdminData,
+  });
+
+  const { data: profiles, isLoading: profilesLoading, error: profilesError } = useQuery({
+    queryKey: ['admin-profiles'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: canFetchAdminData,
+  });
+
+  const { data: categories, isLoading: categoriesLoading } = useCategories({ includeHidden: true });
+
+  // Hooks must run on every render, so they live above the early returns below.
+  const { data: pendingReports } = usePendingReports();
+  const resolveReport = useResolveReport();
+  const deactivatePost = useDeactivatePost();
+  const deleteComment = useDeleteComment();
+
+  // Money and head-counts come from the database (admin_overview), not from adding up rows in the
+  // browser: the browser only ever receives the first 1,000 rows of each table, and commission now varies
+  // per supplier, so a flat percentage was wrong.
+  const { data: overview, isLoading: overviewLoading } = useQuery({
+    queryKey: ['admin-overview-totals'],
+    enabled: canFetchAdminData,
+    staleTime: 60_000,
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc('admin_overview', { _days: 30 });
+      if (error) throw error;
+      return data as unknown as {
+        all_time: {
+          orders: number; payments_received: number; successful_payments: number; commission: number; supplier_net: number;
+          users: number; products: number; suppliers: number;
+        };
+      };
+    },
+  });
+  const allTime = overview?.all_time;
+
+  const successfulPayments = payments?.filter(p => p.status === 'success') || [];
+  const totalRevenue = allTime?.payments_received ?? successfulPayments.reduce((s, p) => s + Number(p.amount), 0);
+  // null = the analytics migration has not been run yet, so show a dash instead of a wrong number.
+  const platformCommission: number | null = allTime ? allTime.commission : null;
+  const supplierEarnings: number | null = allTime ? allTime.supplier_net : null;
+  const naira = (v: number | null) => (v === null ? '-' : formatNaira(v));
+  const successfulCount = allTime?.successful_payments ?? successfulPayments.length;
+  const pendingOrders = orders?.filter(o => o.status === 'pending') || [];
+  const paidOrders = orders?.filter(o => o.status === 'paid') || [];
+  const pendingVendors = vendors?.filter(v => !v.is_approved) || [];
+  const approvedVendors = vendors?.filter(v => v.is_approved) || [];
+
+  const allAdminErrors = [productsError, ordersError, vendorsError, paymentsError, profilesError].filter(Boolean);
+  const hasAdminDataError = allAdminErrors.length > 0;
+
+  const ordersPerDay = Object.entries(
+    (orders || []).reduce((acc: Record<string, number>, order) => {
+      const day = new Date(order.created_at).toLocaleDateString();
+      acc[day] = (acc[day] || 0) + 1;
+      return acc;
+    }, {})
+  ).slice(-7);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary" />
+          <p className="text-muted-foreground text-sm">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAdmin) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+          <p className="text-muted-foreground text-sm">Redirecting to admin login...</p>
+        </div>
+      </div>
+    );
+  }
+
+  const approveVendor = async (vendorId: string) => {
+    const { error } = await supabase.from('vendors').update({ is_approved: true }).eq('id', vendorId);
+    if (error) { toast.error(error.message); return; }
+
+    // Trigger Paystack subaccount creation
+    try {
+      const { data, error: fnError } = await supabase.functions.invoke('create-subaccount', {
+        body: { vendor_id: vendorId },
+      });
+      if (fnError || data?.error) {
+        const reason = await functionErrorMessage(fnError, data);
+        console.error('Subaccount creation error:', reason, fnError);
+        if (/bank details incomplete/i.test(reason)) {
+          toast.info('Supplier approved. Their Paystack subaccount will be created automatically as soon as they add their bank details.', { duration: 10000 });
+        } else {
+          toast.warning(`Supplier approved, but the Paystack subaccount was not created: ${reason}. It will be retried automatically when they open their dashboard.`, { duration: 12000 });
+        }
+      } else {
+        toast.success(`Supplier approved! Subaccount: ${data?.subaccount_code || 'created'}`);
+      }
+    } catch (e) {
+      console.error('Subaccount error:', e);
+      toast.success('Supplier approved! Paystack subaccount setup pending.');
+    }
+    queryClient.invalidateQueries({ queryKey: ['admin-vendors'] });
+  };
+
+  const rejectVendor = async (vendorId: string) => {
+    const { error } = await supabase.from('vendors').update({ is_approved: false }).eq('id', vendorId);
+    if (error) toast.error(error.message);
+    else { toast.success('Supplier rejected'); queryClient.invalidateQueries({ queryKey: ['admin-vendors'] }); }
+  };
+
+  const updateOrderStatus = async (orderId: string, status: string) => {
+    const { error } = await supabase.from('orders').update({ status }).eq('id', orderId);
+    if (error) toast.error(error.message);
+    else { toast.success(`Order marked as ${status}`); queryClient.invalidateQueries({ queryKey: ['admin-orders'] }); }
+  };
+
+  const deleteProduct = async (productId: string) => {
+    if (!window.confirm('Delete this product? If buyers have already ordered it, it is hidden from the shop instead of erased.')) return;
+    try {
+      toast.success(removeSummary(await removeProducts([productId])));
+      queryClient.invalidateQueries({ queryKey: ['admin-products'] });
+    } catch (e: any) {
+      toast.error(e?.message || 'Could not remove the product.');
+    }
+  };
+
+  const navItems: DashNavItem[] = [
+    { key: 'overview', label: 'Overview', icon: LayoutDashboard, group: 'Dashboard' },
+    { key: 'analytics', label: 'Analytics', icon: BarChart3, group: 'Dashboard' },
+    { key: 'traffic', label: 'Traffic', icon: Activity, group: 'Dashboard' },
+    { key: 'earnings', label: 'Earnings', icon: TrendingUp, group: 'Dashboard' },
+    { key: 'suppliers', label: 'Suppliers', icon: Store, badge: pendingVendors.length, group: 'Marketplace' },
+    { key: 'products', label: 'Products', icon: Package, group: 'Marketplace' },
+    { key: 'add-product', label: 'Add product', icon: Plus, group: 'Marketplace' },
+    { key: 'bulk-import', label: 'Bulk product import', icon: FileText, group: 'Marketplace' },
+    { key: 'categories', label: 'Categories', icon: Layers, group: 'Marketplace' },
+    { key: 'flyers', label: 'Flyers', icon: Megaphone, group: 'Marketplace' },
+    { key: 'marketplace', label: 'Pay later, preorders and support', icon: Wallet, group: 'Marketplace' },
+    { key: 'tiktok', label: 'TikTok for sellers', icon: Video, group: 'Marketplace' },
+    { key: 'orders', label: 'Orders', icon: ShoppingCart, group: 'Sales' },
+    { key: 'payments', label: 'Payments', icon: CreditCard, group: 'Sales' },
+    { key: 'finance', label: 'Finance', icon: Landmark, group: 'Sales' },
+    { key: 'commission', label: 'Commission & terms', icon: Percent, group: 'Sales' },
+    { key: 'disputes', label: 'Disputes & refunds', icon: AlertCircle, group: 'Sales' },
+    { key: 'users', label: 'Users', icon: Users, group: 'Community' },
+    { key: 'moderation', label: 'Moderation', icon: Flag, badge: pendingReports?.length ?? 0, group: 'Community' },
+    { key: 'settings', label: 'Settings', icon: Settings, group: 'System' },
+  ];
+
+  const recentOrders = (orders ?? []).slice(0, 5);
+
+  return (
+    <DashboardShell
+      panelLabel="Admin console"
+      title="Administrator"
+      subtitle={user?.email}
+      items={navItems}
+      active={activeTab}
+      onSelect={setActiveTab}
+      onSignOut={() => { signOut(); navigate('/'); }}
+    >
+        {hasAdminDataError && (
+          <div className="mb-6 rounded-lg border border-destructive/30 bg-destructive/5 p-4 flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-destructive shrink-0" />
+            <div className="min-w-0">
+              <p className="font-medium text-sm">Some dashboard data failed to load.</p>
+              <p className="text-xs text-muted-foreground truncate">{String((allAdminErrors[0] as any)?.message || 'Unknown error')}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-auto"
+              onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ['admin-products'] });
+                queryClient.invalidateQueries({ queryKey: ['admin-orders'] });
+                queryClient.invalidateQueries({ queryKey: ['admin-vendors'] });
+                queryClient.invalidateQueries({ queryKey: ['admin-payments'] });
+                queryClient.invalidateQueries({ queryKey: ['admin-profiles'] });
+                queryClient.invalidateQueries({ queryKey: ['categories'] });
+              }}
+            >
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {/* Overview */}
+        {activeTab === 'overview' && (
+          <div className="space-y-5">
+            <WelcomeBanner
+              title="Marketplace at a glance"
+              text="Track sales, review new suppliers and keep the marketplace healthy from one place."
+            >
+              <Button size="sm" variant="secondary" onClick={() => setActiveTab('suppliers')}>
+                Review suppliers{pendingVendors.length > 0 ? ` (${pendingVendors.length})` : ''}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => setActiveTab('flyers')}>Manage flyers</Button>
+            </WelcomeBanner>
+
+            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              <StatCard icon={<Wallet />} label="Total revenue" value={formatNaira(totalRevenue)} loading={paymentsLoading} />
+              <StatCard icon={<DollarSign />} tone="accent" label="Platform commission" value={naira(platformCommission)} loading={paymentsLoading && overviewLoading} />
+              <StatCard icon={<ShoppingCart />} tone="sky" label="Orders" value={String(allTime?.orders ?? orders?.length ?? 0)} loading={ordersLoading && overviewLoading} />
+              <StatCard icon={<Package />} label="Products" value={String(allTime?.products ?? 0)} loading={productsLoading && overviewLoading} />
+              <StatCard icon={<Store />} tone="accent" label="Suppliers" value={String(allTime?.suppliers ?? vendors?.length ?? 0)} loading={vendorsLoading && overviewLoading} />
+              <StatCard icon={<Users />} tone="sky" label="Users" value={String(allTime?.users ?? profiles?.length ?? 0)} loading={profilesLoading && overviewLoading} />
+            </div>
+
+            {pendingVendors.length > 0 && (
+              <div className="flex flex-col gap-3 rounded-xl border border-destructive/20 bg-destructive/5 p-4 sm:flex-row sm:items-center">
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+                  <div>
+                    <p className="text-sm font-medium">{pendingVendors.length} supplier(s) awaiting verification</p>
+                    <p className="text-xs text-muted-foreground">Review uploaded documents and approve or reject suppliers.</p>
+                  </div>
+                </div>
+                <Button size="sm" variant="outline" className="shrink-0" onClick={() => setActiveTab('suppliers')}>Review</Button>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <Panel title="Order status">
+                <dl className="space-y-2.5 text-sm">
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Pending</dt><dd className="font-medium">{pendingOrders.length}</dd></div>
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Paid</dt><dd className="font-medium">{paidOrders.length}</dd></div>
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Total</dt><dd className="font-medium">{orders?.length || 0}</dd></div>
+                </dl>
+              </Panel>
+              <Panel title="Supplier status">
+                <dl className="space-y-2.5 text-sm">
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Approved</dt><dd className="font-medium text-primary">{approvedVendors.length}</dd></div>
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Pending</dt><dd className="font-medium text-destructive">{pendingVendors.length}</dd></div>
+                  <div className="flex justify-between"><dt className="text-muted-foreground">With Paystack</dt><dd className="font-medium">{vendors?.filter(v => v.paystack_subaccount_code).length || 0}</dd></div>
+                </dl>
+              </Panel>
+              <Panel title="Revenue">
+                <dl className="space-y-2.5 text-sm">
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Gross revenue</dt><dd className="font-medium">{formatNaira(totalRevenue)}</dd></div>
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Platform commission</dt><dd className="font-medium text-primary">{naira(platformCommission)}</dd></div>
+                  <div className="flex justify-between"><dt className="text-muted-foreground">Supplier share</dt><dd className="font-medium">{naira(supplierEarnings)}</dd></div>
+                </dl>
+              </Panel>
+            </div>
+
+            <Panel
+              title="Recent orders"
+              flush
+              action={<Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setActiveTab('orders')}>View all <ChevronRight className="ml-1 h-3.5 w-3.5" /></Button>}
+            >
+              {recentOrders.length === 0 ? (
+                <p className="p-6 text-center text-sm text-muted-foreground">No orders yet.</p>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {recentOrders.map((o: any) => (
+                    <li key={o.id} className="flex items-center gap-3 px-4 py-3 text-sm">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium">Order #{String(o.id).slice(0, 8)}</p>
+                        <p className="text-xs text-muted-foreground">{new Date(o.created_at).toLocaleDateString()}</p>
+                      </div>
+                      <StatusBadge status={o.status} />
+                      <span className="w-24 shrink-0 text-right font-semibold">{formatNaira(o.total)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Panel>
+          </div>
+        )}
+
+        {/* Suppliers */}
+        {activeTab === 'suppliers' && (
+          <div className="space-y-4">
+            {/* Pending suppliers first */}
+            {pendingVendors.length > 0 && (
+              <div className="bg-card rounded-xl border border-border overflow-hidden">
+                <div className="p-4 border-b border-border bg-destructive/5">
+                  <h2 className="font-heading font-bold flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-destructive" /> Waiting for review ({pendingVendors.length})
+                  </h2>
+                </div>
+                <div className="overflow-x-auto">
+                  <SupplierTable vendors={pendingVendors} onApprove={approveVendor} onReject={rejectVendor} />
+                </div>
+              </div>
+            )}
+
+            <div className="bg-card rounded-xl border border-border overflow-hidden">
+              <div className="p-4 border-b border-border">
+                <h2 className="font-heading font-bold">All suppliers ({vendors?.length || 0})</h2>
+              </div>
+              {vendorsLoading ? <TableSkeleton /> : (
+                <div className="overflow-x-auto">
+                  <SupplierTable vendors={vendors || []} onApprove={approveVendor} onReject={rejectVendor} />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Orders */}
+        {activeTab === 'orders' && (
+          <div className="bg-card rounded-xl border border-border overflow-hidden">
+            <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-heading font-bold">All orders ({orders?.length || 0})</h2>
+              <ExportButton
+                filename="orders"
+                head={['Order', 'Date', 'Status', 'Payment method', 'Email', 'Phone', 'City', 'State', 'Total']}
+                rows={(orders || []).map((o: any) => [o.id, new Date(o.created_at).toISOString(), o.status, o.payment_method ?? 'card', o.email, o.phone, o.shipping_city, o.shipping_state, Number(o.total)])}
+                disabled={ordersLoading}
+              />
+            </div>
+            {ordersLoading ? <TableSkeleton /> : orders?.length ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-secondary">
+                    <tr>
+                      <th className="text-left p-3 font-heading">Order ID</th>
+                      <th className="text-left p-3 font-heading">Email</th>
+                      <th className="text-left p-3 font-heading">Phone</th>
+                      <th className="text-left p-3 font-heading">Status</th>
+                      <th className="text-left p-3 font-heading">Total</th>
+                      <th className="text-left p-3 font-heading">Date</th>
+                      <th className="text-left p-3 font-heading">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {orders.map(o => (
+                      <tr key={o.id} className="border-t border-border">
+                        <td className="p-3 font-mono text-xs">{o.id.slice(0, 8)}...</td>
+                        <td className="p-3 text-muted-foreground">{o.email || '-'}</td>
+                        <td className="p-3 text-muted-foreground">{o.phone || '-'}</td>
+                        <td className="p-3">
+                          <StatusBadge status={o.status} />
+                        </td>
+                        <td className="p-3 font-medium">{formatNaira(Number(o.total))}</td>
+                        <td className="p-3 text-muted-foreground">{new Date(o.created_at).toLocaleDateString()}</td>
+                        <td className="p-3">
+                          <Select value={o.status} onValueChange={v => updateOrderStatus(o.id, v)}>
+                            <SelectTrigger className="h-7 text-xs w-28"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="pending">Pending</SelectItem>
+                              <SelectItem value="paid">Paid</SelectItem>
+                              <SelectItem value="processing">Processing</SelectItem>
+                              <SelectItem value="shipped">Shipped</SelectItem>
+                              <SelectItem value="delivered">Delivered</SelectItem>
+                              <SelectItem value="cancelled">Cancelled</SelectItem>
+                              <SelectItem value="needs_refund">Needs refund</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="p-8 text-center text-muted-foreground">No orders yet.</p>
+            )}
+          </div>
+        )}
+
+        {/* Payments */}
+        {activeTab === 'payments' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <StatCard icon={<DollarSign className="w-5 h-5 text-primary" />} label="Total Payments" value={formatNaira(totalRevenue)} loading={paymentsLoading} />
+              <StatCard icon={<CreditCard className="w-5 h-5 text-accent" />} label="Successful" value={String(successfulCount)} loading={paymentsLoading} />
+              <StatCard icon={<AlertCircle className="w-5 h-5 text-destructive" />} label="Pending" value={String(payments?.filter(p => p.status === 'pending').length || 0)} loading={paymentsLoading} />
+            </div>
+            <div className="bg-card rounded-xl border border-border overflow-hidden">
+              <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-heading font-bold">All Transactions ({payments?.length || 0})</h2>
+                <ExportButton
+                  filename="payments"
+                  head={['Payment', 'Date', 'Status', 'Method', 'Reference', 'Order', 'Amount']}
+                  rows={(payments || []).map((p: any) => [p.id, new Date(p.created_at).toISOString(), p.status, p.payment_method ?? 'paystack', p.transaction_reference ?? p.paystack_reference, p.order_id, Number(p.amount)])}
+                  disabled={paymentsLoading}
+                />
+              </div>
+              {paymentsLoading ? <TableSkeleton /> : payments?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-secondary">
+                      <tr>
+                        <th className="text-left p-3 font-heading">Reference</th>
+                        <th className="text-left p-3 font-heading">Amount</th>
+                        <th className="text-left p-3 font-heading">Status</th>
+                        <th className="text-left p-3 font-heading">Method</th>
+                        <th className="text-left p-3 font-heading">Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {payments.map(p => (
+                        <tr key={p.id} className="border-t border-border">
+                          <td className="p-3 font-mono text-xs">{p.paystack_reference || p.transaction_reference || p.id.slice(0, 8)}</td>
+                          <td className="p-3 font-medium">{formatNaira(Number(p.amount))}</td>
+                          <td className="p-3"><StatusBadge status={p.status} /></td>
+                          <td className="p-3 text-muted-foreground">{p.payment_method || '-'}</td>
+                          <td className="p-3 text-muted-foreground">{new Date(p.created_at).toLocaleDateString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="p-8 text-center text-muted-foreground">No transactions yet.</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Products */}
+        {activeTab === 'products' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="font-heading font-bold">All Products{productData ? ` (${formatProductCount(productData.total)})` : ''}</h2>
+              <Button size="sm" onClick={() => setActiveTab('add-product')}><Plus className="w-4 h-4 mr-1" /> Add Product</Button>
+            </div>
+            <Input
+              value={productSearch}
+              onChange={e => { setProductSearch(e.target.value); setProductPage(1); }}
+              placeholder="Search products by name"
+              className="max-w-sm"
+              aria-label="Search products"
+            />
+            <div className={`bg-card rounded-xl border border-border overflow-hidden transition-opacity ${productsRefreshing ? 'opacity-60' : ''}`}>
+              {productsLoading ? <TableSkeleton /> : !products?.length ? (
+                <p className="p-8 text-center text-muted-foreground">{debouncedProductSearch ? 'No products match that search.' : 'No products yet.'}</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-secondary">
+                      <tr>
+                        <th className="text-left p-3 font-heading">Product</th>
+                        <th className="text-left p-3 font-heading">Seller</th>
+                        <th className="text-left p-3 font-heading">Category</th>
+                        <th className="text-left p-3 font-heading">Price</th>
+                        <th className="text-left p-3 font-heading">Stock</th>
+                        <th className="text-left p-3 font-heading">Pay later</th>
+                        <th className="text-left p-3 font-heading">Status</th>
+                        <th className="text-left p-3 font-heading">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {products?.map(p => (
+                        <tr key={p.id} className="border-t border-border">
+                          <td className="p-3">
+                            <div className="flex items-center gap-2">
+                              <img src={p.thumb_url || p.image_url || '/placeholder.svg'} alt="" loading="lazy" decoding="async" className="w-8 h-8 rounded object-cover" />
+                              <span className="font-medium line-clamp-1">{p.name}</span>
+                            </div>
+                          </td>
+                          <td className="p-3 text-muted-foreground">{p.vendors?.store_name || 'Admin'}</td>
+                          <td className="p-3 text-muted-foreground">{p.categories?.name || '-'}</td>
+                          <td className="p-3 font-medium">{formatNaira(p.price)}</td>
+                          <td className="p-3">{p.stock_quantity}</td>
+                          <td className="p-3">
+                            <Switch checked={!!(p as any).bnpl_eligible} aria-label="Allow Pay later"
+                              onCheckedChange={async (v) => {
+                                const { error } = await supabase.from('products').update({ bnpl_eligible: v }).eq('id', p.id);
+                                if (error) toast.error(error.message);
+                                else { queryClient.invalidateQueries({ queryKey: ['admin-products'] }); toast.success(v ? 'Pay later enabled' : 'Pay later disabled'); }
+                              }} />
+                          </td>
+                          <td className="p-3"><StatusBadge status={p.is_active ? 'active' : 'inactive'} /></td>
+                          <td className="p-3">
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deleteProduct(p.id)}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <ProductPager page={productPage} pageCount={productData?.pageCount ?? 1} onChange={setProductPage} />
+            {productData?.capped && (
+              <p className="text-center text-xs text-muted-foreground">
+                Showing the newest {(MAX_MANAGE_PAGES * MANAGE_PAGE_SIZE).toLocaleString('en-NG')} products. Use the search box to find older ones.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Categories */}
+        {activeTab === 'traffic' && <TrafficTab />}
+        {activeTab === 'bulk-import' && <BulkProductImportTab vendors={vendors ?? []} />}
+        {activeTab === 'flyers' && <FlyersTab />}
+        {activeTab === 'marketplace' && <MarketplaceAdminTab />}
+        {activeTab === 'tiktok' && <div className="max-w-2xl"><TikTokSwitch /></div>}
+
+        {activeTab === 'finance' && <FinanceTab />}
+        {activeTab === 'commission' && <SupplierCommissionTab />}
+        {activeTab === 'disputes' && <OrderOpsTab />}
+
+        {activeTab === 'categories' && (
+          <CategoriesTab categories={categories || []} loading={categoriesLoading} onRefresh={() => queryClient.invalidateQueries({ queryKey: ['categories'] })} />
+        )}
+
+        {/* Users */}
+        {/* Moderation */}
+        {activeTab === 'moderation' && (
+          <div className="bg-card rounded-xl border border-border overflow-hidden">
+            <div className="p-4 border-b border-border">
+              <h2 className="font-heading font-bold">Pending Reports ({pendingReports?.length || 0})</h2>
+              <p className="text-xs text-muted-foreground mt-1">Videos and comments flagged by buyers, waiting for review.</p>
+            </div>
+            {!pendingReports?.length ? (
+              <div className="flex flex-col items-center justify-center py-10 text-muted-foreground gap-2">
+                <Flag className="w-8 h-8" />
+                <p className="text-sm">No pending reports</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-border">
+                {pendingReports.map((r) => (
+                  <div key={r.id} className="p-4 flex flex-col sm:flex-row gap-4">
+                    {r.post ? (
+                      <video
+                        src={r.post.video_url}
+                        poster={r.post.thumbnail_url ?? undefined}
+                        className="w-24 h-40 object-cover rounded-lg bg-black shrink-0"
+                        muted
+                        preload="metadata"
+                        controls
+                      />
+                    ) : (
+                      <div className="w-24 h-40 rounded-lg bg-muted flex items-center justify-center text-xs text-muted-foreground shrink-0 p-2 text-center">
+                        Comment
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0 space-y-2">
+                      <div>
+                        <Badge className="mb-1">{r.reason}</Badge>
+                        {r.post?.caption && <p className="text-sm text-muted-foreground line-clamp-2">{r.post.caption}</p>}
+                        {r.comment && (
+                          <p className="text-sm bg-muted rounded p-2 mt-1">&ldquo;{r.comment.content}&rdquo;</p>
+                        )}
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Reported {new Date(r.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {r.post && r.post.is_active && (
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => {
+                              deactivatePost.mutate({ postId: r.post!.id, isActive: false });
+                              resolveReport.mutate({ reportId: r.id, status: 'reviewed' });
+                            }}
+                          >
+                            <XCircle className="w-3.5 h-3.5 mr-1" /> Take down video
+                          </Button>
+                        )}
+                        {r.comment && (
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => {
+                              deleteComment.mutate({ commentId: r.comment!.id, postId: r.comment!.post_id });
+                              resolveReport.mutate({ reportId: r.id, status: 'reviewed' });
+                            }}
+                          >
+                            <XCircle className="w-3.5 h-3.5 mr-1" /> Delete comment
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => resolveReport.mutate({ reportId: r.id, status: 'dismissed' })}
+                        >
+                          <CheckCircle className="w-3.5 h-3.5 mr-1" /> Dismiss report
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'users' && (
+          <div className="bg-card rounded-xl border border-border overflow-hidden">
+            <div className="p-4 border-b border-border">
+              <h2 className="font-heading font-bold">All Users ({profiles?.length || 0})</h2>
+            </div>
+            {profilesLoading ? <TableSkeleton /> : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-secondary">
+                    <tr>
+                      <th className="text-left p-3 font-heading">Name</th>
+                      <th className="text-left p-3 font-heading">Phone</th>
+                      <th className="text-left p-3 font-heading">City</th>
+                      <th className="text-left p-3 font-heading">State</th>
+                      <th className="text-left p-3 font-heading">Joined</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {profiles?.map(p => (
+                      <tr key={p.id} className="border-t border-border">
+                        <td className="p-3 font-medium">{p.full_name || 'Unknown'}</td>
+                        <td className="p-3 text-muted-foreground">{p.phone || '-'}</td>
+                        <td className="p-3 text-muted-foreground">{p.city || '-'}</td>
+                        <td className="p-3 text-muted-foreground">{p.state || '-'}</td>
+                        <td className="p-3 text-muted-foreground">{new Date(p.created_at).toLocaleDateString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Analytics */}
+        {activeTab === 'analytics' && <AnalyticsTab />}
+
+        {/* Settings */}
+        {activeTab === 'settings' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-card rounded-xl border border-border p-4">
+                <h3 className="font-heading font-semibold mb-3">Access & Security</h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between"><span className="text-muted-foreground">Authenticated admin</span><StatusBadge status={isAdmin ? 'approved' : 'pending'} /></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Current user</span><span className="font-mono text-xs">{user?.id?.slice(0, 8)}...</span></div>
+                </div>
+              </div>
+
+              <div className="bg-card rounded-xl border border-border p-4">
+                <h3 className="font-heading font-semibold mb-3">System Connectivity</h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between"><span className="text-muted-foreground">Suppliers with Paystack subaccount</span><span className="font-medium">{vendors?.filter(v => !!v.paystack_subaccount_code).length || 0}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Pending document reviews</span><span className="font-medium">{pendingVendors.length}</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-card rounded-xl border border-border p-4 flex items-center gap-3">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  queryClient.invalidateQueries({ queryKey: ['admin-products'] });
+                  queryClient.invalidateQueries({ queryKey: ['admin-orders'] });
+                  queryClient.invalidateQueries({ queryKey: ['admin-vendors'] });
+                  queryClient.invalidateQueries({ queryKey: ['admin-payments'] });
+                  queryClient.invalidateQueries({ queryKey: ['admin-profiles'] });
+                  queryClient.invalidateQueries({ queryKey: ['categories'] });
+                  toast.success('Dashboard data refreshed');
+                }}
+              >
+                Refresh Dashboard Data
+              </Button>
+              <Button variant="ghost" onClick={() => { signOut(); navigate('/admin-login'); }}>
+                Sign out admin
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Earnings */}
+        {activeTab === 'earnings' && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <StatCard icon={<DollarSign className="w-5 h-5 text-primary" />} label="Total Revenue" value={formatNaira(totalRevenue)} loading={paymentsLoading} />
+              <StatCard icon={<DollarSign className="w-5 h-5 text-accent" />} label="Platform commission" value={naira(platformCommission)} loading={paymentsLoading && overviewLoading} />
+              <StatCard icon={<Store className="w-5 h-5 text-primary" />} label="Supplier share" value={naira(supplierEarnings)} loading={paymentsLoading && overviewLoading} />
+            </div>
+            <div className="bg-card rounded-xl border border-border overflow-hidden">
+              <div className="p-4 border-b border-border">
+                <h2 className="font-heading font-bold">Supplier Earnings Breakdown</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-secondary">
+                    <tr>
+                      <th className="text-left p-3 font-heading">Supplier</th>
+                      <th className="text-left p-3 font-heading">Subaccount</th>
+                      <th className="text-left p-3 font-heading">Status</th>
+                      <th className="text-left p-3 font-heading">Bank</th>
+                      <th className="text-left p-3 font-heading">Verified</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vendors?.map(v => (
+                      <tr key={v.id} className="border-t border-border">
+                        <td className="p-3 font-medium">{v.store_name}</td>
+                        <td className="p-3 font-mono text-xs text-muted-foreground">{v.paystack_subaccount_code || 'Not created'}</td>
+                        <td className="p-3"><StatusBadge status={v.paystack_subaccount_code ? 'active' : 'pending'} /></td>
+                        <td className="p-3 text-muted-foreground">{v.bank_name || '-'} {v.bank_account_number ? `(***${v.bank_account_number.slice(-4)})` : ''}</td>
+                        <td className="p-3"><StatusBadge status={v.is_approved ? 'approved' : 'pending'} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Add Product */}
+        {activeTab === 'add-product' && (
+          <AddProductForm categories={categories || []} onSuccess={() => {
+            queryClient.invalidateQueries({ queryKey: ['admin-products'] });
+            setActiveTab('products');
+          }} />
+        )}
+    </DashboardShell>
+  );
+}
+
+/* ── Helper Components ── */
+
+function StatusBadge({ status }: { status: string }) {
+  const tone: Record<string, 'good' | 'warn' | 'bad' | 'idle'> = {
+    success: 'good', active: 'good', approved: 'good', paid: 'good', delivered: 'good',
+    pending: 'warn', processing: 'warn', shipped: 'warn',
+    inactive: 'idle',
+    failed: 'bad', cancelled: 'bad', rejected: 'bad',
+  };
+  return <StatusDot tone={tone[status] ?? 'idle'}>{status.charAt(0).toUpperCase() + status.slice(1)}</StatusDot>;
+}
+
+function TableSkeleton() {
+  return (
+    <div className="p-4 space-y-3">
+      {[1, 2, 3, 4].map(i => <Skeleton key={i} className="h-10 w-full" />)}
+    </div>
+  );
+}
+
+function SupplierTable({ vendors, onApprove, onReject }: { vendors: any[]; onApprove: (id: string) => void; onReject: (id: string) => void }) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewTitle, setPreviewTitle] = useState('');
+
+  const openPreview = (url: string, title: string) => {
+    setPreviewUrl(url);
+    setPreviewTitle(title);
+  };
+
+  const isImage = (url: string) => /\.(jpg|jpeg|png|gif|webp|svg)(\?|$)/i.test(url);
+
+  // Verification documents sit in a private bucket, so open them with a short-lived signed link.
+  const openDocument = async (path: string, title: string) => {
+    const { data, error } = await supabase.storage.from('vendor-docs').createSignedUrl(path, 300);
+    if (error || !data?.signedUrl) {
+      toast.error('Could not open this document. Older uploads need the move-vendor-docs script to be run once.');
+      return;
+    }
+    openPreview(data.signedUrl, title);
+  };
+
+  return (
+    <>
+      {/* Fullscreen document/image preview dialog */}
+      <Dialog open={!!previewUrl} onOpenChange={() => setPreviewUrl(null)}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-auto">
+          <DialogHeader>
+            <DialogTitle>{previewTitle}</DialogTitle>
+          </DialogHeader>
+          {previewUrl && (
+            isImage(previewUrl) ? (
+              <img src={previewUrl} alt={previewTitle} className="w-full rounded-lg object-contain max-h-[70vh]" />
+            ) : /\.pdf(\?|$)/i.test(previewUrl) ? (
+              <iframe src={previewUrl} className="w-full h-[70vh] rounded-lg border border-border" title={previewTitle} />
+            ) : (
+              <div className="text-center py-8">
+                <FileText className="w-12 h-12 mx-auto text-muted-foreground mb-3" />
+                <p className="text-sm text-muted-foreground mb-3">Preview not available for this file type.</p>
+                <a href={previewUrl} target="_blank" rel="noopener noreferrer">
+                  <Button size="sm">Download / Open in new tab</Button>
+                </a>
+              </div>
+            )
+          )}
+          <div className="flex justify-end">
+            <a href={previewUrl || '#'} target="_blank" rel="noopener noreferrer">
+              <Button variant="outline" size="sm">Open in new tab</Button>
+            </a>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Phones and small tablets: one card per supplier, nothing hidden off to the side */}
+      <ul className="divide-y divide-border md:hidden">
+        {vendors.map(v => (
+          <li key={v.id} className="space-y-3 p-4">
+            <div className="flex items-start gap-3">
+              <Logo v={v} size="h-11 w-11" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-medium leading-tight">{v.store_name}</p>
+                {v.company_name && v.company_name !== v.store_name && <p className="truncate text-xs text-muted-foreground">{v.company_name}</p>}
+                <p className="mt-0.5 text-xs text-muted-foreground">{[v.address, joined(v.created_at)].filter(Boolean).join(' · ')}</p>
+              </div>
+              <ApprovalStatus v={v} />
+            </div>
+
+            <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5 text-sm">
+              <dt className="text-muted-foreground">Phone</dt>
+              <dd>{v.phone ? <a href={`tel:${v.phone}`} className="text-foreground underline-offset-2 hover:underline">{v.phone}</a> : <span className="text-muted-foreground">Not given</span>}</dd>
+              <dt className="text-muted-foreground">WhatsApp</dt>
+              <dd>{v.whatsapp_number ? <a href={waLink(v.whatsapp_number)} target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-2 hover:underline">{v.whatsapp_number}</a> : <span className="text-muted-foreground">Not given</span>}</dd>
+            </dl>
+
+            <div className="rounded-md border border-border p-3">
+              <p className="mb-1.5 text-xs text-muted-foreground">Payout account</p>
+              <Payout v={v} />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <DocLinks v={v} openPreview={openPreview} openDocument={openDocument} />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <RowActions v={v} onApprove={onApprove} onReject={onReject} wide />
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {/* Tablets and desktops: a table */}
+      <table className="hidden w-full text-sm md:table">
+        <thead>
+          <tr>
+            <th className="p-3 pl-4 text-left">Supplier</th>
+            <th className="p-3 text-left">Contact</th>
+            <th className="p-3 text-left">Payout account</th>
+            <th className="p-3 text-left">Documents</th>
+            <th className="p-3 text-left">Status</th>
+            <th className="p-3 pr-4 text-right"><span className="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {vendors.map(v => (
+            <tr key={v.id} className="border-t border-border align-top">
+              <td className="p-3 pl-4">
+                <div className="flex items-start gap-3">
+                  <Logo v={v} size="h-10 w-10" />
+                  <div className="min-w-0 max-w-[16rem]">
+                    <p className="truncate font-medium leading-tight">{v.store_name}</p>
+                    {v.company_name && v.company_name !== v.store_name && <p className="truncate text-xs text-muted-foreground">{v.company_name}</p>}
+                    {v.address && <p className="truncate text-xs text-muted-foreground">{v.address}</p>}
+                    <p className="text-xs text-muted-foreground/80">{joined(v.created_at)}</p>
+                  </div>
+                </div>
+              </td>
+              <td className="p-3 text-[13px]">
+                <div>{v.phone ? <a href={`tel:${v.phone}`} className="hover:underline">{v.phone}</a> : <span className="text-muted-foreground">No phone</span>}</div>
+                {v.whatsapp_number && <a href={waLink(v.whatsapp_number)} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline">WhatsApp {v.whatsapp_number}</a>}
+              </td>
+              <td className="p-3"><Payout v={v} /></td>
+              <td className="p-3"><div className="flex flex-col items-start gap-1"><DocLinks v={v} openPreview={openPreview} openDocument={openDocument} /></div></td>
+              <td className="p-3"><ApprovalStatus v={v} /></td>
+              <td className="p-3 pr-4"><div className="flex justify-end gap-1.5"><RowActions v={v} onApprove={onApprove} onReject={onReject} /></div></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {vendors.length === 0 && <p className="p-8 text-center text-sm text-muted-foreground">No suppliers here yet.</p>}
+    </>
+  );
+}
+
+/* Small pieces of the supplier list */
+
+const joined = (d?: string | null) => (d ? `Joined ${new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}` : '');
+const waLink = (n: string) => `https://wa.me/${n.replace(/\D/g, '')}`;
+
+function Logo({ v, size }: { v: any; size: string }) {
+  return v.logo_url
+    ? <img src={v.logo_url} alt="" className={`${size} shrink-0 rounded-md border border-border bg-white object-contain`} loading="lazy" />
+    : <div className={`${size} flex shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground`}><Store className="h-4 w-4" /></div>;
+}
+
+function ApprovalStatus({ v }: { v: any }) {
+  return (
+    <div className="flex flex-col items-end gap-1 md:items-start">
+      <StatusDot tone={v.is_approved ? 'good' : 'warn'}>{v.is_approved ? 'Approved' : 'Awaiting review'}</StatusDot>
+      <span className="text-[11px] text-muted-foreground">{v.paystack_subaccount_code ? 'Paystack linked' : 'No Paystack account'}</span>
+    </div>
+  );
+}
+
+function Payout({ v }: { v: any }) {
+  if (!v.bank_name && !v.bank_account_number) return <span className="text-sm text-muted-foreground">No bank details</span>;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(String(v.bank_account_number)); toast.success('Account number copied'); }
+    catch { toast.error('Could not copy. Select the number and copy it by hand.'); }
+  };
+  return (
+    <div className="text-[13px] leading-snug">
+      <p className="font-medium">{v.bank_name || 'Bank not given'}</p>
+      {v.bank_account_number ? (
+        <p className="flex items-center gap-1.5">
+          <span className="font-mono tabular-nums tracking-wide">{v.bank_account_number}</span>
+          <button type="button" onClick={copy} aria-label="Copy account number" className="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <Copy className="h-3.5 w-3.5" />
+          </button>
+        </p>
+      ) : <p className="text-muted-foreground">No account number</p>}
+      <p className="text-muted-foreground">{v.bank_account_name || 'No account name'}</p>
+    </div>
+  );
+}
+
+function DocLinks({ v, openPreview, openDocument }: { v: any; openPreview: (url: string, title: string) => void; openDocument: (path: string, title: string) => void }) {
+  const link = 'inline-flex items-center gap-1 text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded';
+  return (
+    <>
+      {v.logo_url
+        ? <button type="button" className={link} onClick={() => openPreview(v.logo_url, `${v.store_name} - Logo`)}><Eye className="h-3 w-3" /> Logo</button>
+        : <span className="text-xs text-muted-foreground">No logo</span>}
+      {v.verification_document_url
+        ? <button type="button" className={link} onClick={() => openDocument(v.verification_document_url, `${v.store_name} - Verification Document`)}><FileText className="h-3 w-3" /> Verification document</button>
+        : <span className="text-xs text-muted-foreground">No verification document</span>}
+    </>
+  );
+}
+
+function RowActions({ v, onApprove, onReject, wide }: { v: any; onApprove: (id: string) => void; onReject: (id: string) => void; wide?: boolean }) {
+  const w = wide ? 'flex-1' : '';
+  return (
+    <>
+      {!v.is_approved
+        ? <Button size="sm" className={`h-8 ${w}`} onClick={() => onApprove(v.id)}><CheckCircle className="mr-1.5 h-3.5 w-3.5" />Approve</Button>
+        : <Button size="sm" variant="outline" className={`h-8 text-destructive hover:text-destructive ${w}`} onClick={() => onReject(v.id)}><XCircle className="mr-1.5 h-3.5 w-3.5" />Revoke</Button>}
+      <Button size="sm" variant="outline" className={`h-8 ${w}`} asChild><Link to={`/shop/${v.id}`}><Eye className="mr-1.5 h-3.5 w-3.5" />View shop</Link></Button>
+    </>
+  );
+}
+
+/* ── Categories Tab ── */
+
+function CategoriesTab({ categories, loading, onRefresh }: { categories: any[]; loading: boolean; onRefresh: () => void }) {
+  const [name, setName] = useState('');
+  const [slug, setSlug] = useState('');
+  const [description, setDescription] = useState('');
+  const [imageUrl, setImageUrl] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addCategory = async () => {
+    if (!name || !slug) { toast.error('Name and slug are required'); return; }
+    setSaving(true);
+    const { error } = await supabase.from('categories').insert({
+      name, slug: slug.toLowerCase().replace(/\s+/g, '-'),
+      description: description || null, image_url: imageUrl || null,
+    });
+    setSaving(false);
+    if (error) toast.error(error.message);
+    else {
+      toast.success('Category added!');
+      setName(''); setSlug(''); setDescription(''); setImageUrl('');
+      onRefresh();
+    }
+  };
+
+  const deleteCategory = async (id: string) => {
+    const { error } = await supabase.from('categories').delete().eq('id', id);
+    if (error) toast.error(error.message);
+    else { toast.success('Category deleted'); onRefresh(); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-card p-6 rounded-lg card-shadow max-w-lg space-y-4">
+        <h2 className="font-heading text-lg font-bold flex items-center gap-2"><FolderPlus className="w-5 h-5" /> Add Category</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <div><Label>Name *</Label><Input value={name} onChange={e => { setName(e.target.value); setSlug(e.target.value.toLowerCase().replace(/\s+/g, '-')); }} /></div>
+          <div><Label>Slug *</Label><Input value={slug} onChange={e => setSlug(e.target.value)} /></div>
+          <div className="col-span-2"><Label>Description</Label><Input value={description} onChange={e => setDescription(e.target.value)} /></div>
+          <div className="col-span-2"><Label>Image URL</Label><Input value={imageUrl} onChange={e => setImageUrl(e.target.value)} /></div>
+        </div>
+        <Button onClick={addCategory} disabled={saving}>{saving ? 'Adding...' : 'Add Category'}</Button>
+      </div>
+
+      <div className="bg-card rounded-xl border border-border overflow-hidden">
+        <div className="p-4 border-b border-border">
+          <h2 className="font-heading font-bold">All Categories ({categories.length})</h2>
+        </div>
+        {loading ? <TableSkeleton /> : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-secondary">
+                <tr>
+                  <th className="text-left p-3 font-heading">Name</th>
+                  <th className="text-left p-3 font-heading">Slug</th>
+                  <th className="text-left p-3 font-heading">Description</th>
+                  <th className="text-left p-3 font-heading">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {categories.map(c => (
+                  <tr key={c.id} className="border-t border-border">
+                    <td className="p-3 font-medium">{c.name}</td>
+                    <td className="p-3 font-mono text-xs text-muted-foreground">{c.slug}</td>
+                    <td className="p-3 text-muted-foreground text-xs">{c.description || '-'}</td>
+                    <td className="p-3">
+                      <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => deleteCategory(c.id)}>
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Add Product Form ── */
+
+function AddProductForm({ categories, onSuccess }: { categories: any[]; onSuccess: () => void }) {
+  const [form, setForm] = useState({
+    name: '', price: '', compare_at_price: '', category_id: '', brand: '', stock_quantity: '10',
+    description: '', image_url: '', badge: '', sku: '', bnpl_eligible: false,
+  });
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    // A pasted (borrowed) image link is copied into Cloudinary so it survives if the original site removes it.
+    const typedUrl = form.image_url.trim();
+    const copied = typedUrl ? await mirrorExternalImages(null, [typedUrl]) : {};
+    const slug = form.name.toLowerCase().replace(/[^\w ]+/g, '').replace(/ +/g, '-') + '-' + Date.now();
+    const { error } = await supabase.from('products').insert({
+      name: form.name, slug,
+      price: Number(form.price),
+      compare_at_price: form.compare_at_price ? Number(form.compare_at_price) : null,
+      category_id: form.category_id || null,
+      brand: form.brand || null,
+      stock_quantity: Number(form.stock_quantity),
+      description: form.description || null,
+      image_url: (copied[typedUrl] || typedUrl) || null,
+      badge: form.badge || null,
+      bnpl_eligible: form.bnpl_eligible,
+      sku: form.sku || null,
+    });
+    setLoading(false);
+    if (error) toast.error(error.message);
+    else { toast.success('Product added!'); onSuccess(); }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="bg-card p-6 rounded-lg card-shadow max-w-2xl space-y-4">
+      <h2 className="font-heading text-xl font-bold flex items-center gap-2"><Plus className="w-5 h-5" /> Add Product</h2>
+      <div className="grid grid-cols-2 gap-4">
+        <div><Label>Name *</Label><Input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} required /></div>
+        <div><Label>Brand</Label><Input value={form.brand} onChange={e => setForm(p => ({ ...p, brand: e.target.value }))} /></div>
+        <div><Label>Price (₦) *</Label><Input type="number" value={form.price} onChange={e => setForm(p => ({ ...p, price: e.target.value }))} required /></div>
+        <div><Label>Compare Price</Label><Input type="number" value={form.compare_at_price} onChange={e => setForm(p => ({ ...p, compare_at_price: e.target.value }))} /></div>
+        <div>
+          <Label>Category</Label>
+          <Select value={form.category_id} onValueChange={v => setForm(p => ({ ...p, category_id: v }))}>
+            <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
+            <SelectContent>{categories.map(c => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>
+        <div><Label>Stock</Label><Input type="number" value={form.stock_quantity} onChange={e => setForm(p => ({ ...p, stock_quantity: e.target.value }))} /></div>
+        <div><Label>Image URL</Label><Input value={form.image_url} onChange={e => setForm(p => ({ ...p, image_url: e.target.value }))} /></div>
+        <div><Label>Badge</Label><Input placeholder="New, Sale, etc." value={form.badge} onChange={e => setForm(p => ({ ...p, badge: e.target.value }))} /></div>
+      </div>
+      <div className="flex items-start gap-3 rounded-lg border border-border p-4">
+        <Switch id="admin-bnpl-eligible" checked={form.bnpl_eligible} onCheckedChange={v => setForm(p => ({ ...p, bnpl_eligible: v }))} />
+        <div>
+          <Label htmlFor="admin-bnpl-eligible" className="font-medium">Allow Pay later (buy now, pay later)</Label>
+          <p className="text-xs text-muted-foreground">Buyers can pay in instalments through Klump. Best for higher-priced items such as laptops and phones.</p>
+        </div>
+      </div>
+      <div><Label>Description</Label><Textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} /></div>
+      <Button type="submit" disabled={loading}>{loading ? 'Adding...' : 'Add Product'}</Button>
+    </form>
+  );
+}

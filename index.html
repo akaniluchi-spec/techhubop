@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- TODO: Set the document title to the name of your application -->
+    <title>IT Hub Africa - Buy, Sell, and Grow With Confidence</title>
+    <meta name="description" content="IT Hub Africa - Nigeria&#39;s online marketplace for fashion, electronics, home goods, groceries and more from trusted vendors.">
+    <link rel="preconnect" href="%VITE_SUPABASE_URL%" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" />
+    <link rel="preconnect" href="https://js.paystack.co" />
+    <link rel="preconnect" href="https://checkout.paystack.com" />
+    <link rel="preconnect" href="https://js.useklump.com" />
+    <meta name="author" content="Lovable" />
+
+    <!-- TODO: Update og:title to match your application name -->
+    
+    
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://storage.googleapis.com/gpt-engineer-file-uploads/nTAoth2eR6fROUBNrBXbCoIQhgL2/social-images/social-1772210568820-Screenshot_27-2-2026_83959_ithubafrica.com.webp">
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@Lovable" />
+    <meta name="twitter:image" content="https://storage.googleapis.com/gpt-engineer-file-uploads/nTAoth2eR6fROUBNrBXbCoIQhgL2/social-images/social-1772210568820-Screenshot_27-2-2026_83959_ithubafrica.com.webp">
+    <meta property="og:title" content="IT Hub Africa - Buy, Sell, and Grow With Confidence">
+  <meta name="twitter:title" content="IT Hub Africa - Buy, Sell, and Grow With Confidence">
+  <meta property="og:description" content="IT Hub Africa - Nigeria&#39;s online marketplace for fashion, electronics, home goods, groceries and more from trusted vendors.">
+  <meta name="twitter:description" content="IT Hub Africa - Nigeria&#39;s online marketplace for fashion, electronics, home goods, groceries and more from trusted vendors.">
+</head>
+
+  <body>
+    <!-- Klump's official script looks up #klump__checkout once, when it loads, so the element must already
+         exist in the page. It is kept invisible: customers use our own "Continue with Pay later" button. -->
+    <div aria-hidden="true" style="position:absolute;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none">
+      <div id="klump__checkout"></div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <!-- Payment scripts load AFTER the app script on purpose. Deferred scripts run in page order, so with them
+         in <head> the whole site waited for Paystack and Klump to download before it could even start.
+         They are still deferred, so #klump__checkout above exists when klump.js runs. -->
+    <script src="https://js.paystack.co/v2/inline.js" defer></script>
+    <script src="https://js.useklump.com/klump.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,228 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Send } from 'lucide-react';
+import Layout from '@/components/layout/Layout';
+import HeroCarousel from '@/components/HeroCarousel';
+import TrustStrip from '@/components/TrustStrip';
+import ScrollRow, { ScrollItem } from '@/components/ScrollRow';
+import SupplierCard from '@/components/SupplierCard';
+import ProductCard, { ProductCardSkeleton } from '@/components/ProductCard';
+import { useProducts, useSuppliers } from '@/hooks/useProducts';
+import { getMoq } from '@/lib/pricing';
+import { bnplEligibleForPrice, useMarketplaceSettings, usePayLaterAvailable, usePublicFinance } from '@/hooks/useMarketplace';
+import { useAuth } from '@/hooks/useAuth';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { FlyerBanner, pickImages } from '@/components/flyers/Flyers';
+import { FLYERS } from '@/lib/flyers';
+import { useFlyers } from '@/hooks/useFlyers';
+import { ImageFlyerBanner, ImageFlyerFill } from '@/components/flyers/ImageFlyers';
+import { BrandFlyerBanner, BrandFlyerFeedCard, BrandFlyerFill } from '@/components/flyers/BrandFlyerImage';
+import { BRAND_FLYERS } from '@/lib/brandFlyers';
+import BrandMarquee from '@/components/BrandMarquee';
+import { StoreVisitSection } from '@/components/StoreVisit';
+import CategoryShelves from '@/components/CategoryShelves';
+
+const FEED_PAGE = 20;
+
+export default function Index() {
+  const { isVendor } = useAuth();
+  const { data: products, isLoading } = useProducts({ limit: 120 });
+  const { data: featured } = useProducts({ featured: true, limit: 12 });
+  const { data: lowMoq } = useProducts({ maxMoq: 5, limit: 12 });
+  const { data: suppliers } = useSuppliers({ limit: 10 });
+  const { data: bnplProducts } = useProducts({ bnplOnly: true, limit: 24 });
+  const { data: preorderProducts } = useProducts({ preorderOnly: true, limit: 12 });
+  const { data: finance } = usePublicFinance();
+  const payLaterOn = usePayLaterAvailable();
+  const { data: marketplace } = useMarketplaceSettings();
+  // Only products that really qualify for Pay later right now are advertised.
+  const payLaterRow = useMemo(
+    () => (bnplProducts ?? []).filter(p => bnplEligibleForPrice(p, finance, payLaterOn)).slice(0, 12),
+    [bnplProducts, finance, payLaterOn],
+  );
+  const [visible, setVisible] = useState(FEED_PAGE);
+  const sentinel = useRef<HTMLDivElement>(null);
+
+  const deals = useMemo(
+    () => (products ?? []).filter(p => p.compare_at_price && p.compare_at_price > p.price).slice(0, 12),
+    [products],
+  );
+  const newest = (products ?? []).slice(0, 12);
+  const feed = products ?? [];
+
+  // Product photos used as flyer artwork (real data only).
+  const photos = useMemo(
+    () => (products ?? []).map(p => p.image_url).filter((u): u is string => !!u),
+    [products],
+  );
+  const art = (offset: number, count = 3) => pickImages(photos, offset, count);
+
+  // Flyers the admin uploaded. Each spot below uses an uploaded one when there
+  // is one for it, and the built-in flyer otherwise.
+  const { ready: flyersReady, forPlacement } = useFlyers();
+  const rowBanners = forPlacement('row_banner');
+  const hasUploadedRows = rowBanners.length > 0;
+  const feedBanners = forPlacement('feed_banner');
+  const feedCards = forPlacement('feed_card');
+
+  // Endless feed: reveal more cards as the sentinel scrolls into view.
+  useEffect(() => {
+    const node = sentinel.current;
+    if (!node || visible >= feed.length) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) setVisible(v => v + FEED_PAGE);
+    }, { rootMargin: '400px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visible, feed.length]);
+
+  return (
+    <Layout flushFooter>
+      <HeroCarousel images={photos} />
+      <TrustStrip />
+
+      <div className="container max-w-[1440px] pb-6">
+        {!!suppliers?.length && (
+          <ScrollRow eyebrow="Trusted sellers" title="Verified suppliers" linkTo="/products?tab=suppliers">
+            {suppliers.map(s => <ScrollItem key={s.id} wide><SupplierCard supplier={s} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {/* Flyer: "Seamless payment" banner between the suppliers row and the product rows */}
+        {flyersReady && (rowBanners[0]
+          ? <ImageFlyerBanner className="mt-8 sm:mt-10" flyer={rowBanners[0]} />
+          : hasUploadedRows ? null : <BrandFlyerBanner className="mt-8 sm:mt-10" flyer={BRAND_FLYERS.seamlessPurple} />)}
+
+        {payLaterOn && !!payLaterRow.length && (
+          <ScrollRow eyebrow="Buy now, pay later" title="Pay later with Klump" linkTo="/pay-later">
+            {payLaterRow.map(p => <ScrollItem key={p.id}><ProductCard {...p} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {marketplace?.preorder_enabled !== false && !!preorderProducts?.length && (
+          <ScrollRow eyebrow="Order ahead" title="Preorders" linkTo="/preorders">
+            {preorderProducts.map(p => <ScrollItem key={p.id}><ProductCard {...p} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {!!lowMoq?.length && (products ?? []).some(p => getMoq(p) > 5) && (
+          <ScrollRow eyebrow="Start small" title="Low MOQ" linkTo="/products">
+            {lowMoq.map(p => <ScrollItem key={p.id}><ProductCard {...p} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {!!featured?.length && (
+          <ScrollRow eyebrow="Picked for you" title="Featured products" linkTo="/products">
+            {featured.map(p => <ScrollItem key={p.id}><ProductCard {...p} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {/* Flyer: wide banner after the featured row */}
+        {flyersReady && (rowBanners[1]
+          ? <ImageFlyerBanner className="mt-8 sm:mt-10" flyer={rowBanners[1]} />
+          : hasUploadedRows ? null : <FlyerBanner className="mt-8 sm:mt-10" flyer={FLYERS.lowMoq} images={art(FLYERS.lowMoq.offset)} />)}
+
+        {!!deals.length && (
+          <ScrollRow eyebrow="Price drops" title="Best deals" linkTo="/products">
+            {deals.map(p => <ScrollItem key={p.id}><ProductCard {...p} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {!!newest.length && (
+          <ScrollRow eyebrow="Just in" title="New arrivals" linkTo="/products">
+            {newest.map(p => <ScrollItem key={p.id}><ProductCard {...p} /></ScrollItem>)}
+          </ScrollRow>
+        )}
+
+        {/* One row per category that has products (loads each row as it scrolls into view) */}
+        <CategoryShelves />
+
+        <section className="mt-9 sm:mt-12">
+          <h2 className="mb-4 font-heading text-xl font-bold sm:text-2xl">You may like</h2>
+          {isLoading ? (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              {Array.from({ length: 10 }).map((_, index) => <ProductCardSkeleton key={index} />)}
+            </div>
+          ) : feed.length ? (
+            <>
+              <div className="grid grid-flow-dense grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                {feed.slice(0, visible).flatMap((product, i) => {
+                  const cells: React.ReactNode[] = [<ProductCard key={product.id} {...product} />];
+                  // Flyers inside the feed: a card-sized one after the 10th product of
+                  // every 30, a full-width banner after the 24th. grid-flow-dense lets
+                  // later products fill any gap a full-width banner leaves.
+                  const slot = (i + 1) % 30;
+                  const round = Math.floor(i / 30);
+                  // Picture flyers are two columns wide and two rows tall on a phone, so the next products fill the
+                  // space beside them. They need at least 2 more products after them, otherwise they are left out.
+                  const roomBesideFlyer = Math.min(visible, feed.length) - (i + 1) >= 2;
+                  if (slot === 10 && flyersReady) {
+                    if (feedCards.length) {
+                      const u = feedCards[round % feedCards.length];
+                      if (roomBesideFlyer) cells.push(<div key={`fc-${i}`} className="col-span-2 min-h-[200px] sm:col-span-1 sm:min-h-[260px]"><ImageFlyerFill flyer={u} /></div>);
+                    } else {
+                      if (round % 2 === 0) {
+                        if (roomBesideFlyer) cells.push(<div key={`fc-${i}`} className="col-span-2 min-h-[200px] sm:col-span-1 sm:min-h-[260px]"><BrandFlyerFill flyer={BRAND_FLYERS.mysteryDeal} fit="contain" /></div>);
+                      } else {
+                        // Designed 16:9 banners (suppliers / "can't find it" / sell). Compact on a phone, row-height on desktop.
+                        const feedBanner = [BRAND_FLYERS.suppliers, BRAND_FLYERS.rfq, BRAND_FLYERS.sell][Math.floor(round / 2) % 3];
+                        cells.push(<BrandFlyerFeedCard key={`fc-${i}`} flyer={feedBanner} />);
+                      }
+                    }
+                  }
+                  if (slot === 24 && flyersReady) {
+                    if (feedBanners.length) {
+                      const u = feedBanners[round % feedBanners.length];
+                      cells.push(<ImageFlyerBanner key={`fb-${i}`} className="col-span-full" flyer={u} />);
+                    } else {
+                      const f = [FLYERS.deals, FLYERS.bulk, FLYERS.watch][round % 3];
+                      cells.push(<FlyerBanner key={`fb-${i}`} className="col-span-full" flyer={f} images={art(f.offset + round * 2)} />);
+                    }
+                  }
+                  return cells;
+                })}
+              </div>
+              <div ref={sentinel} className="h-10" aria-hidden="true" />
+              {visible < feed.length && (
+                <div className="text-center">
+                  <Button variant="outline" onClick={() => setVisible(v => v + FEED_PAGE)}>Load more</Button>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="border-y border-border py-14 text-center text-sm text-muted-foreground">
+              Products will appear here as sellers add them.
+            </div>
+          )}
+          <div className="mt-6 text-center">
+            <Link to="/products" className="text-sm font-semibold text-primary hover:underline">Browse all products</Link>
+          </div>
+        </section>
+      </div>
+
+      <BrandMarquee />
+
+      <StoreVisitSection />
+
+      <section className="py-14 md:py-20 bg-foreground dark:bg-black text-background dark:text-white">
+        <div className="container max-w-lg text-center">
+          <h2 className="font-heading text-2xl md:text-3xl font-bold mb-2 text-background dark:text-white">Stay Updated</h2>
+          <p className="text-background/70 dark:text-white/70 text-sm md:text-base mb-7">
+            Get the latest deals and product updates directly to your inbox.
+          </p>
+          <form className="flex gap-2" onSubmit={e => e.preventDefault()}>
+            <Input
+              placeholder="Enter your email"
+              type="email"
+              className="flex-1 bg-background/20 dark:bg-white/10 border-background/30 dark:border-white/20 text-background dark:text-white placeholder:text-background/50 dark:placeholder:text-white/50 h-11"
+            />
+            <Button type="submit" size="lg" className="shrink-0 bg-primary hover:bg-primary/90 text-primary-foreground">
+              <Send className="w-4 h-4 mr-1.5" /> Subscribe
+            </Button>
+          </form>
+        </div>
+      </section>
+    </Layout>
+  );
+}

@@ -1,0 +1,52 @@
+project_id = "cgyzhkeliomwxwrpmnlh"
+
+[functions.initialize-payment]
+verify_jwt = false
+
+[functions.verify-payment]
+verify_jwt = false
+
+[functions.paystack-webhook]
+verify_jwt = false
+
+[functions.create-subaccount]
+verify_jwt = false
+
+[functions.create-stream-upload]
+verify_jwt = false
+
+[functions.create-recipient]
+verify_jwt = false
+
+[functions.run-payouts]
+verify_jwt = false
+
+[functions.klump-initialize]
+verify_jwt = false
+
+[functions.klump-verify]
+verify_jwt = false
+
+[functions.klump-webhook]
+verify_jwt = false
+
+[functions.refund-order]
+verify_jwt = false
+
+[functions.paystack-readiness]
+verify_jwt = false
+
+[functions.bulk-product-import]
+verify_jwt = false
+
+[functions.stream-webhook]
+verify_jwt = false
+
+[functions.check-stream-post]
+verify_jwt = false
+
+[functions.tiktok]
+verify_jwt = false
+
+[functions.mirror-product-images]
+verify_jwt = false
